@@ -1,0 +1,63 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&family=Lora:wght@500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Dark mode (default — dashboard, chat) */
+:root {
+  --an-bg-base:       #1A1917;
+  --an-bg-subtle:     #222220;
+  --an-bg-surface:    #2A2927;
+  --an-bg-elevated:   #333230;
+  --an-border-base:   rgba(255,255,255,0.08);
+  --an-border-strong: rgba(255,255,255,0.14);
+  --an-fg-base:       #F2EFE9;
+  --an-fg-subtle:     #9B9793;
+  --an-fg-muted:      #6B6864;
+  --an-fg-inverted:   #1A1917;
+  --an-accent:        #D97757;
+  --an-accent-hover:  #C96B49;
+  --an-accent-subtle: rgba(217,119,87,0.15);
+  --an-success:       #5B9B6B;
+  --an-warning:       #C9963A;
+  --an-error:         #C05B5B;
+}
+
+/* Light mode override (auth pages) */
+[data-theme="light"] {
+  --an-bg-base:       #FAF9F7;
+  --an-bg-subtle:     #F2F0EC;
+  --an-bg-surface:    #ECEAE5;
+  --an-bg-elevated:   #E4E2DC;
+  --an-border-base:   rgba(0,0,0,0.08);
+  --an-border-strong: rgba(0,0,0,0.18);
+  --an-fg-base:       #1A1917;
+  --an-fg-subtle:     #6B6864;
+  --an-fg-muted:      #9B9793;
+  --an-fg-inverted:   #FAF9F7;
+  --an-accent-subtle: rgba(217,119,87,0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--an-bg-base);
+  color: var(--an-fg-base);
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.an-fade-in {
+  animation: anFadeIn 150ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes anFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
