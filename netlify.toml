@@ -3,7 +3,6 @@
   publish = ".next"
 
 [functions]
-  # Increase timeout for Azure AI agent calls (default 10s is too short)
   timeout = 30
 
 [[plugins]]
