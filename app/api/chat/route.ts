@@ -1,9 +1,47 @@
 import { NextRequest } from 'next/server'
 import { createMessage, updateSession } from '@/lib/db'
-import { getAzureClient } from '@/lib/azure'
 import { supabaseServer } from '@/lib/supabase-server'
 
 const FALLBACK = 'I was unable to get a response from the AI agent. Please try again.'
+const API_VERSION = '2025-05-01'
+
+function getAzureConfig() {
+  const apiKey = process.env.AZURE_API_KEY
+  const endpointUrl = process.env.AZURE_AGENT_ENDPOINT
+  const agentId = process.env.AZURE_AGENT_ID
+
+  if (!apiKey || !endpointUrl) {
+    throw new Error('Missing Azure env vars: AZURE_API_KEY, AZURE_AGENT_ENDPOINT')
+  }
+  if (!agentId) {
+    throw new Error('Missing Azure env var: AZURE_AGENT_ID')
+  }
+
+  return { apiKey, endpointUrl, agentId }
+}
+
+async function azureFetch(url: string, apiKey: string, options: RequestInit = {}) {
+  const separator = url.includes('?') ? '&' : '?'
+  const res = await fetch(`${url}${separator}api-version=${API_VERSION}`, {
+    ...options,
+    headers: {
+      'api-key': apiKey,
+      'Content-Type': 'application/json',
+      ...((options.headers as Record<string, string>) ?? {}),
+    },
+  })
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    const err = new Error(
+      `Azure ${res.status}${body ? `: ${body.slice(0, 300)}` : ''}`
+    ) as Error & { status: number }
+    err.status = res.status
+    throw err
+  }
+
+  return res.json()
+}
 
 export async function POST(req: NextRequest) {
   const { sessionId, userMessage, contractText } = await req.json()
@@ -12,10 +50,8 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'sessionId and userMessage are required' }, { status: 400 })
   }
 
-  // Save user message to DB
   const userMsg = await createMessage(sessionId, 'user', userMessage)
 
-  // Auto-title: replace default title with first 55 chars of first user message
   const { data: session } = await supabaseServer
     .from('sessions')
     .select('title')
@@ -28,24 +64,62 @@ export async function POST(req: NextRequest) {
     await updateSession(sessionId, { title: sessionTitle })
   }
 
-  // Mark session as processing
   await updateSession(sessionId, { status: 'processing', updated_at: new Date().toISOString() })
 
   let assistantText = FALLBACK
 
   try {
-    const openai = getAzureClient()
+    const { apiKey, endpointUrl, agentId } = getAzureConfig()
 
     const combinedInput = contractText
       ? `CONTRACT TEXT:\n${contractText}\n\nUSER QUESTION:\n${userMessage}`
       : userMessage
 
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: combinedInput }],
+    // 1. Create a new thread
+    const thread = await azureFetch(`${endpointUrl}/threads`, apiKey, {
+      method: 'POST',
+      body: '{}',
     })
 
-    assistantText = response.choices[0]?.message?.content ?? FALLBACK
+    // 2. Add user message to the thread
+    await azureFetch(`${endpointUrl}/threads/${thread.id}/messages`, apiKey, {
+      method: 'POST',
+      body: JSON.stringify({ role: 'user', content: combinedInput }),
+    })
+
+    // 3. Run the thread against the agent
+    const run = await azureFetch(`${endpointUrl}/threads/${thread.id}/runs`, apiKey, {
+      method: 'POST',
+      body: JSON.stringify({ assistant_id: agentId }),
+    })
+
+    // 4. Poll until completed / failed (max 55s, 2s intervals)
+    let runStatus: string = run.status
+    const deadline = Date.now() + 55_000
+    while (
+      !['completed', 'failed', 'cancelled', 'expired'].includes(runStatus) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 2000))
+      const polled = await azureFetch(
+        `${endpointUrl}/threads/${thread.id}/runs/${run.id}`,
+        apiKey
+      )
+      runStatus = polled.status
+    }
+
+    if (runStatus !== 'completed') {
+      throw new Error(`Agent run ended with status: ${runStatus}`)
+    }
+
+    // 5. Retrieve messages and extract the latest assistant reply
+    const messages = await azureFetch(`${endpointUrl}/threads/${thread.id}/messages`, apiKey)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const assistantMsg = (messages.data as any[])?.find((m) => m.role === 'assistant')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const firstContent = assistantMsg?.content?.[0] as any
+    assistantText =
+      firstContent?.type === 'text' ? (firstContent.text?.value ?? FALLBACK) : FALLBACK
 
     await updateSession(sessionId, { status: 'completed', updated_at: new Date().toISOString() })
   } catch (err: unknown) {
@@ -55,20 +129,24 @@ export async function POST(req: NextRequest) {
 
     await updateSession(sessionId, { status: 'error', updated_at: new Date().toISOString() })
 
-    // Surface missing env vars clearly
-    if (errMsg.includes('Missing Azure env vars')) {
-      const msg = 'Azure is not configured. Add AZURE_API_KEY and AZURE_AGENT_ENDPOINT to your Netlify environment variables.'
+    if (errMsg.includes('Missing Azure env var')) {
+      const msg = `Azure is not configured: ${errMsg}. Add the missing variable to your Netlify environment variables.`
       await createMessage(sessionId, 'assistant', msg)
-      return Response.json({ assistantMessage: msg, userMessageId: userMsg.id, assistantMessageId: '', sessionTitle }, { status: 500 })
+      return Response.json(
+        { assistantMessage: msg, userMessageId: userMsg.id, assistantMessageId: '', sessionTitle },
+        { status: 500 }
+      )
     }
 
     if (httpStatus === 401 || httpStatus === 403) {
       const msg = `Azure authentication failed (${httpStatus}). Check your AZURE_API_KEY in Netlify environment variables.`
       await createMessage(sessionId, 'assistant', msg)
-      return Response.json({ assistantMessage: msg, userMessageId: userMsg.id, assistantMessageId: '', sessionTitle }, { status: httpStatus })
+      return Response.json(
+        { assistantMessage: msg, userMessageId: userMsg.id, assistantMessageId: '', sessionTitle },
+        { status: httpStatus }
+      )
     }
 
-    // Return the raw error as the assistant message so it's visible in chat
     assistantText = `Error from Azure: ${errMsg}`
   }
 
