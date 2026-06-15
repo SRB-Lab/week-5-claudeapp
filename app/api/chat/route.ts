@@ -87,13 +87,29 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({ role: 'user', content: combinedInput }),
     })
 
-    // 3. Run the thread against the agent
+    // 3. Resolve agent ID — if it looks like a display name, list agents to find the real asst_xxx ID
+    let resolvedAgentId = agentId
+    if (!agentId.startsWith('asst_')) {
+      const agentList = await azureFetch(`${endpointUrl}/agents`, apiKey)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const match = (agentList.data as any[])?.find(
+        (a) => a.name === agentId || a.id === agentId
+      )
+      if (!match) {
+        throw new Error(
+          `Agent "${agentId}" not found. Available agents: ${(agentList.data as any[])?.map((a: any) => a.name).join(', ')}`
+        )
+      }
+      resolvedAgentId = match.id
+    }
+
+    // 4. Run the thread against the agent
     const run = await azureFetch(`${endpointUrl}/threads/${thread.id}/runs`, apiKey, {
       method: 'POST',
-      body: JSON.stringify({ assistant_id: agentId }),
+      body: JSON.stringify({ assistant_id: resolvedAgentId }),
     })
 
-    // 4. Poll until completed / failed (max 55s, 2s intervals)
+    // 5. Poll until completed / failed (max 55s, 2s intervals)
     let runStatus: string = run.status
     const deadline = Date.now() + 55_000
     while (
@@ -112,7 +128,7 @@ export async function POST(req: NextRequest) {
       throw new Error(`Agent run ended with status: ${runStatus}`)
     }
 
-    // 5. Retrieve messages and extract the latest assistant reply
+    // 6. Retrieve messages and extract the latest assistant reply
     const messages = await azureFetch(`${endpointUrl}/threads/${thread.id}/messages`, apiKey)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const assistantMsg = (messages.data as any[])?.find((m) => m.role === 'assistant')
