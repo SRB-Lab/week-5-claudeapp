@@ -1,4 +1,4 @@
-# Anthropic / Claude Design System
+# Anthropic / Claude Design System 
 
 **Inspired by:** claude.ai product UI and anthropic.com marketing site
 
