@@ -53,14 +53,27 @@ export async function POST(req: NextRequest) {
 
     await updateSession(sessionId, { status: 'completed', updated_at: new Date().toISOString() })
   } catch (err: unknown) {
-    console.error('Azure chat error:', err)
+    const errMsg = err instanceof Error ? err.message : String(err)
+    const httpStatus = (err as { status?: number }).status ?? 0
+    console.error('[Azure chat error]', httpStatus, errMsg)
+
     await updateSession(sessionId, { status: 'error', updated_at: new Date().toISOString() })
 
-    const httpStatus = (err as { status?: number }).status ?? 0
-    if (httpStatus === 401 || httpStatus === 403) {
-      await createMessage(sessionId, 'assistant', FALLBACK)
-      return Response.json({ error: 'Azure authentication failed. Check AZURE_API_KEY.' }, { status: httpStatus })
+    // Surface missing env vars clearly
+    if (errMsg.includes('Missing Azure env vars')) {
+      const msg = 'Azure is not configured. Add AZURE_API_KEY and AZURE_AGENT_ENDPOINT to your Netlify environment variables.'
+      await createMessage(sessionId, 'assistant', msg)
+      return Response.json({ assistantMessage: msg, userMessageId: userMsg.id, assistantMessageId: '', sessionTitle }, { status: 500 })
     }
+
+    if (httpStatus === 401 || httpStatus === 403) {
+      const msg = `Azure authentication failed (${httpStatus}). Check your AZURE_API_KEY in Netlify environment variables.`
+      await createMessage(sessionId, 'assistant', msg)
+      return Response.json({ assistantMessage: msg, userMessageId: userMsg.id, assistantMessageId: '', sessionTitle }, { status: httpStatus })
+    }
+
+    // Return the raw error as the assistant message so it's visible in chat
+    assistantText = `Error from Azure: ${errMsg}`
   }
 
   const assistantMsg = await createMessage(sessionId, 'assistant', assistantText)
