@@ -40,16 +40,12 @@ export async function POST(req: NextRequest) {
       ? `CONTRACT TEXT:\n${contractText}\n\nUSER QUESTION:\n${userMessage}`
       : userMessage
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const response = await (openai.responses.create as any)({
-      input: [{ role: 'user', content: combinedInput }],
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: combinedInput }],
     })
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const firstOutput = response.output?.find((o: any) => o.type === 'message')
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rawText = firstOutput?.content?.find((c: any) => c.type === 'output_text')?.text
-    assistantText = response.output_text ?? rawText ?? FALLBACK
+    assistantText = response.choices[0]?.message?.content ?? FALLBACK
 
     await updateSession(sessionId, { status: 'completed', updated_at: new Date().toISOString() })
   } catch (err: unknown) {
