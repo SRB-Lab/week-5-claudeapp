@@ -7,15 +7,20 @@ const API_VERSION = '2025-05-01'
 
 function getAzureConfig() {
   const apiKey = process.env.AZURE_API_KEY
-  const endpointUrl = process.env.AZURE_AGENT_ENDPOINT
+  // Accept either env var name
+  const rawEndpoint = process.env.AZURE_AGENT_ENDPOINT ?? process.env.AZURE_AGENT_ENDPOINT_URL
   const agentId = process.env.AZURE_AGENT_ID
 
   if (!apiKey) throw new Error('Missing env var: AZURE_API_KEY')
-  if (!endpointUrl) throw new Error('Missing env var: AZURE_AGENT_ENDPOINT')
+  if (!rawEndpoint) throw new Error('Missing env var: AZURE_AGENT_ENDPOINT')
   if (!agentId) throw new Error('Missing env var: AZURE_AGENT_ID')
 
-  // Strip trailing slash
-  return { apiKey, endpointUrl: endpointUrl.replace(/\/$/, ''), agentId }
+  // Extract base project URL — works even if the full agent endpoint URL is stored
+  // e.g. https://x.services.ai.azure.com/api/projects/foo/agents/... → .../api/projects/foo
+  const match = rawEndpoint.match(/(https:\/\/.+?\/api\/projects\/[^/]+)/)
+  const endpointUrl = match ? match[1] : rawEndpoint.replace(/\/$/, '')
+
+  return { apiKey, endpointUrl, agentId }
 }
 
 async function azureFetch(url: string, apiKey: string, options: RequestInit = {}) {
