@@ -5,58 +5,27 @@ import { supabaseServer } from '@/lib/supabase-server'
 const FALLBACK = 'I was unable to get a response from the AI agent. Please try again.'
 const API_VERSION = '2025-05-01'
 
-// Module-level token cache (survives across requests in same function instance)
-let tokenCache: { token: string; expiresAt: number } | null = null
+function getAzureConfig() {
+  const apiKey = process.env.AZURE_API_KEY
+  const endpointUrl = process.env.AZURE_AGENT_ENDPOINT
+  const agentId = process.env.AZURE_AGENT_ID
 
-async function getAzureToken(): Promise<string> {
-  const clientId = process.env.AZURE_CLIENT_ID
-  const clientSecret = process.env.AZURE_CLIENT_SECRET
-  const tenantId = process.env.AZURE_TENANT_ID
+  if (!apiKey) throw new Error('Missing env var: AZURE_API_KEY')
+  if (!endpointUrl) throw new Error('Missing env var: AZURE_AGENT_ENDPOINT')
+  if (!agentId) throw new Error('Missing env var: AZURE_AGENT_ID')
 
-  if (!clientId || !clientSecret || !tenantId) {
-    throw new Error(
-      'Missing Azure OAuth env vars: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID'
-    )
-  }
-
-  // Return cached token if still valid (2 min buffer)
-  if (tokenCache && tokenCache.expiresAt > Date.now() + 120_000) {
-    return tokenCache.token
-  }
-
-  const res = await fetch(
-    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: clientId,
-        client_secret: clientSecret,
-        scope: 'https://cognitiveservices.azure.com/.default',
-      }).toString(),
-    }
-  )
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`Failed to get Azure AD token (${res.status}): ${body.slice(0, 200)}`)
-  }
-
-  const data = await res.json()
-  tokenCache = {
-    token: data.access_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
-  }
-  return tokenCache.token
+  // Strip trailing slash
+  return { apiKey, endpointUrl: endpointUrl.replace(/\/$/, ''), agentId }
 }
 
-async function azureFetch(url: string, token: string, options: RequestInit = {}) {
+async function azureFetch(url: string, apiKey: string, options: RequestInit = {}) {
   const separator = url.includes('?') ? '&' : '?'
-  const res = await fetch(`${url}${separator}api-version=${API_VERSION}`, {
+  const fullUrl = `${url}${separator}api-version=${API_VERSION}`
+
+  const res = await fetch(fullUrl, {
     ...options,
     headers: {
-      Authorization: `Bearer ${token}`,
+      'api-key': apiKey,
       'Content-Type': 'application/json',
       ...((options.headers as Record<string, string>) ?? {}),
     },
@@ -65,23 +34,13 @@ async function azureFetch(url: string, token: string, options: RequestInit = {})
   if (!res.ok) {
     const body = await res.text().catch(() => '')
     const err = new Error(
-      `Azure ${res.status}${body ? `: ${body.slice(0, 300)}` : ''}`
+      `Azure ${res.status} at ${url.split('?')[0]}: ${body.slice(0, 400)}`
     ) as Error & { status: number }
     err.status = res.status
     throw err
   }
 
   return res.json()
-}
-
-function getEndpointConfig() {
-  const endpointUrl = process.env.AZURE_AGENT_ENDPOINT
-  const agentId = process.env.AZURE_AGENT_ID
-
-  if (!endpointUrl) throw new Error('Missing Azure env var: AZURE_AGENT_ENDPOINT')
-  if (!agentId) throw new Error('Missing Azure env var: AZURE_AGENT_ID')
-
-  return { endpointUrl, agentId }
 }
 
 export async function POST(req: NextRequest) {
@@ -110,8 +69,7 @@ export async function POST(req: NextRequest) {
   let assistantText = FALLBACK
 
   try {
-    const token = await getAzureToken()
-    const { endpointUrl, agentId } = getEndpointConfig()
+    const { apiKey, endpointUrl, agentId } = getAzureConfig()
 
     const combinedInput = contractText
       ? `CONTRACT TEXT:\n${contractText}\n\nUSER QUESTION:\n${userMessage}`
@@ -120,30 +78,31 @@ export async function POST(req: NextRequest) {
     // 1. Resolve agent display name → asst_xxx ID if needed
     let resolvedAgentId = agentId
     if (!agentId.startsWith('asst_')) {
-      const agentList = await azureFetch(`${endpointUrl}/agents`, token)
+      const agentList = await azureFetch(`${endpointUrl}/agents`, apiKey)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const match = (agentList.data as any[])?.find((a) => a.name === agentId || a.id === agentId)
       if (!match) {
-        const names = (agentList.data as any[])?.map((a: any) => a.name).join(', ') // eslint-disable-line @typescript-eslint/no-explicit-any
-        throw new Error(`Agent "${agentId}" not found. Available: ${names}`)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const names = (agentList.data as any[])?.map((a: any) => a.name).join(', ') ?? 'none'
+        throw new Error(`Agent "${agentId}" not found. Available agents: ${names}`)
       }
       resolvedAgentId = match.id
     }
 
     // 2. Create a new thread
-    const thread = await azureFetch(`${endpointUrl}/threads`, token, {
+    const thread = await azureFetch(`${endpointUrl}/threads`, apiKey, {
       method: 'POST',
       body: '{}',
     })
 
     // 3. Add user message to the thread
-    await azureFetch(`${endpointUrl}/threads/${thread.id}/messages`, token, {
+    await azureFetch(`${endpointUrl}/threads/${thread.id}/messages`, apiKey, {
       method: 'POST',
       body: JSON.stringify({ role: 'user', content: combinedInput }),
     })
 
     // 4. Run the thread against the agent
-    const run = await azureFetch(`${endpointUrl}/threads/${thread.id}/runs`, token, {
+    const run = await azureFetch(`${endpointUrl}/threads/${thread.id}/runs`, apiKey, {
       method: 'POST',
       body: JSON.stringify({ assistant_id: resolvedAgentId }),
     })
@@ -158,7 +117,7 @@ export async function POST(req: NextRequest) {
       await new Promise((r) => setTimeout(r, 2000))
       const polled = await azureFetch(
         `${endpointUrl}/threads/${thread.id}/runs/${run.id}`,
-        token
+        apiKey
       )
       runStatus = polled.status
     }
@@ -168,7 +127,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 6. Retrieve messages and extract the latest assistant reply
-    const messages = await azureFetch(`${endpointUrl}/threads/${thread.id}/messages`, token)
+    const messages = await azureFetch(`${endpointUrl}/threads/${thread.id}/messages`, apiKey)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const assistantMsg = (messages.data as any[])?.find((m) => m.role === 'assistant')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -184,16 +143,7 @@ export async function POST(req: NextRequest) {
 
     await updateSession(sessionId, { status: 'error', updated_at: new Date().toISOString() })
 
-    if (errMsg.includes('Missing Azure')) {
-      const msg = `Azure is not configured: ${errMsg}. Add the missing variable to your Netlify environment variables.`
-      await createMessage(sessionId, 'assistant', msg)
-      return Response.json(
-        { assistantMessage: msg, userMessageId: userMsg.id, assistantMessageId: '', sessionTitle },
-        { status: 500 }
-      )
-    }
-
-    assistantText = `Error from Azure: ${errMsg}`
+    assistantText = `Error: ${errMsg}`
   }
 
   const assistantMsg = await createMessage(sessionId, 'assistant', assistantText)
